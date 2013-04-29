@@ -31,6 +31,7 @@ from oslo.config import cfg
 from sqlalchemy import and_
 from sqlalchemy import Boolean
 from sqlalchemy.exc import DataError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -121,7 +122,7 @@ def require_instance_exists_using_uuid(f):
     """
     @functools.wraps(f)
     def wrapper(context, instance_uuid, *args, **kwargs):
-        db.instance_get_by_uuid(context, instance_uuid)
+        instance_get_by_uuid(context, instance_uuid)
         return f(context, instance_uuid, *args, **kwargs)
 
     return wrapper
@@ -136,7 +137,7 @@ def require_aggregate_exists(f):
 
     @functools.wraps(f)
     def wrapper(context, aggregate_id, *args, **kwargs):
-        db.aggregate_get(context, aggregate_id)
+        aggregate_get(context, aggregate_id)
         return f(context, aggregate_id, *args, **kwargs)
     return wrapper
 
@@ -323,25 +324,36 @@ class InequalityCondition(object):
 def service_destroy(context, service_id):
     session = get_session()
     with session.begin():
-        service_ref = service_get(context, service_id, session=session)
-        service_ref.soft_delete(session=session)
+        count = model_query(context, models.Service, session=session).\
+                    filter_by(id=service_id).\
+                    soft_delete(synchronize_session=False)
 
-        if (service_ref.topic == CONF.compute_topic and
-            service_ref.compute_node):
-            for c in service_ref.compute_node:
-                c.soft_delete(session=session)
+        if count == 0:
+            raise exception.ServiceNotFound(service_id=service_id)
+
+        model_query(context, models.ComputeNode, session=session).\
+                    filter_by(service_id=service_id).\
+                    soft_delete(synchronize_session=False)
 
 
 @require_admin_context
-def service_get(context, service_id, session=None):
-    result = model_query(context, models.Service, session=session).\
-                     options(joinedload('compute_node')).\
-                     filter_by(id=service_id).\
-                     first()
+def _service_get(context, service_id, with_compute_node=True, session=None):
+    query = model_query(context, models.Service, session=session).\
+                     filter_by(id=service_id)
+
+    if with_compute_node:
+        query = query.options(joinedload('compute_node'))
+
+    result = query.first()
     if not result:
         raise exception.ServiceNotFound(service_id=service_id)
 
     return result
+
+
+@require_admin_context
+def service_get(context, service_id):
+    return _service_get(context, service_id)
 
 
 @require_admin_context
@@ -419,7 +431,8 @@ def service_create(context, values):
 def service_update(context, service_id, values):
     session = get_session()
     with session.begin():
-        service_ref = service_get(context, service_id, session=session)
+        service_ref = _service_get(context, service_id,
+                                   with_compute_node=False, session=session)
         service_ref.update(values)
         service_ref.save(session=session)
     return service_ref
@@ -530,6 +543,11 @@ def compute_node_update(context, compute_id, values, prune_stats=False):
     with session.begin():
         _update_stats(context, stats, compute_id, session, prune_stats)
         compute_ref = _compute_node_get(context, compute_id, session=session)
+        # Always update this, even if there's going to be no other
+        # changes in data.  This ensures that we invalidate the
+        # scheduler cache of compute node data in case of races.
+        if 'updated_at' not in values:
+            values['updated_at'] = timeutils.utcnow()
         convert_datetimes(values, 'created_at', 'deleted_at', 'updated_at')
         compute_ref.update(values)
     return compute_ref
@@ -1164,14 +1182,15 @@ def fixed_ip_get_by_address_detailed(context, address, session=None):
     if not session:
         session = get_session()
 
-    result = session.query(models.FixedIp, models.Network, models.Instance).\
-        filter_by(address=address).\
-        outerjoin((models.Network,
-                   models.Network.id ==
-                   models.FixedIp.network_id)).\
-        outerjoin((models.Instance,
-                   models.Instance.uuid ==
-                   models.FixedIp.instance_uuid)).\
+    result = model_query(context, models.FixedIp, models.Network,
+                         models.Instance, session=session).\
+                         filter_by(address=address).\
+                         outerjoin((models.Network,
+                                    models.Network.id ==
+                                    models.FixedIp.network_id)).\
+                         outerjoin((models.Instance,
+                                    models.Instance.uuid ==
+                                    models.FixedIp.instance_uuid)).\
         first()
 
     if not result:
@@ -1237,6 +1256,18 @@ def fixed_ip_update(context, address, values):
                                                session=session)
         fixed_ip_ref.update(values)
         fixed_ip_ref.save(session=session)
+
+
+@require_context
+def fixed_ip_count_by_project(context, project_id, session=None):
+    nova.context.authorize_project_context(context, project_id)
+    return model_query(context, models.FixedIp.id,
+                       base_model=models.FixedIp, read_deleted="no",
+                       session=session).\
+                join((models.Instance,
+                      models.Instance.uuid == models.FixedIp.instance_uuid)).\
+                filter(models.Instance.uuid == project_id).\
+                count()
 
 
 ###################
@@ -1429,12 +1460,9 @@ def instance_create(context, values):
         instance_ref.security_groups = _get_sec_group_models(session,
                 security_groups)
         instance_ref.save(session=session)
-        # NOTE(comstud): This forces instance_type to be loaded so it
-        # exists in the ref when we return.  Fixes lazy loading issues.
-        instance_ref.instance_type
 
     # create the instance uuid to ec2_id mapping entry for instance
-    db.ec2_instance_create(context, instance_ref['uuid'])
+    ec2_instance_create(context, instance_ref['uuid'])
 
     return instance_ref
 
@@ -1473,8 +1501,10 @@ def instance_destroy(context, instance_uuid, constraint=None):
         session.query(models.SecurityGroupInstanceAssociation).\
                 filter_by(instance_uuid=instance_uuid).\
                 soft_delete()
-
         session.query(models.InstanceInfoCache).\
+                 filter_by(instance_uuid=instance_uuid).\
+                 soft_delete()
+        session.query(models.InstanceMetadata).\
                  filter_by(instance_uuid=instance_uuid).\
                  soft_delete()
     return instance_ref
@@ -1521,7 +1551,6 @@ def _build_instance_get(context, session=None):
             options(joinedload_all('security_groups.rules')).\
             options(joinedload('info_cache')).\
             options(joinedload('metadata')).\
-            options(joinedload('instance_type')).\
             options(joinedload('system_metadata'))
 
 
@@ -1529,7 +1558,7 @@ def _build_instance_get(context, session=None):
 def instance_get_all(context, columns_to_join=None):
     if columns_to_join is None:
         columns_to_join = ['info_cache', 'security_groups', 'metadata',
-                           'instance_type', 'system_metadata']
+                           'system_metadata']
     query = model_query(context, models.Instance)
     for column in columns_to_join:
         query = query.options(joinedload(column))
@@ -1559,7 +1588,6 @@ def instance_get_all_by_filters(context, filters, sort_key, sort_dir,
             options(joinedload('security_groups')).\
             options(joinedload('system_metadata')).\
             options(joinedload('metadata')).\
-            options(joinedload('instance_type')).\
             order_by(sort_fn[sort_dir](getattr(models.Instance, sort_key)))
 
     # Make a copy of the filters dictionary to use going forward, as we'll
@@ -1658,7 +1686,6 @@ def instance_get_active_by_window_joined(context, begin, end=None,
     query = query.options(joinedload('info_cache')).\
                   options(joinedload('security_groups')).\
                   options(joinedload('metadata')).\
-                  options(joinedload('instance_type')).\
                   options(joinedload('system_metadata')).\
                   filter(or_(models.Instance.terminated_at == None,
                              models.Instance.terminated_at > begin))
@@ -1678,7 +1705,6 @@ def _instance_get_all_query(context, project_only=False):
                    options(joinedload('info_cache')).\
                    options(joinedload('security_groups')).\
                    options(joinedload('metadata')).\
-                   options(joinedload('instance_type')).\
                    options(joinedload('system_metadata'))
 
 
@@ -1847,13 +1873,6 @@ def _instance_update(context, instance_uuid, values, copy_old_instance=False):
 
         instance_ref.update(values)
         instance_ref.save(session=session)
-        if 'instance_type_id' in values:
-            # NOTE(comstud): It appears that sqlalchemy doesn't refresh
-            # the instance_type model after you update the ID.  You end
-            # up with an instance_type model that only has 'id' updated,
-            # but the rest of the model has the data from the old
-            # instance_type.
-            session.refresh(instance_ref['instance_type'])
 
     return (old_instance_ref, instance_ref)
 
@@ -1943,10 +1962,12 @@ def key_pair_create(context, values):
 @require_context
 def key_pair_destroy(context, user_id, name):
     nova.context.authorize_user_context(context, user_id)
-    model_query(context, models.KeyPair).\
-             filter_by(user_id=user_id).\
-             filter_by(name=name).\
-             delete()
+    result = model_query(context, models.KeyPair).\
+                         filter_by(user_id=user_id).\
+                         filter_by(name=name).\
+                         delete()
+    if not result:
+        raise exception.KeypairNotFound(user_id=user_id, name=name)
 
 
 @require_context
@@ -2830,19 +2851,14 @@ def _block_device_mapping_get_query(context, session=None):
 def block_device_mapping_create(context, values):
     bdm_ref = models.BlockDeviceMapping()
     bdm_ref.update(values)
-
-    session = get_session()
-    with session.begin():
-        bdm_ref.save(session=session)
+    bdm_ref.save()
 
 
 @require_context
 def block_device_mapping_update(context, bdm_id, values):
-    session = get_session()
-    with session.begin():
-        _block_device_mapping_get_query(context, session=session).\
-                filter_by(id=bdm_id).\
-                update(values)
+    _block_device_mapping_get_query(context).\
+            filter_by(id=bdm_id).\
+            update(values)
 
 
 @require_context
@@ -2865,7 +2881,8 @@ def block_device_mapping_update_or_create(context, values):
         virtual_name = values['virtual_name']
         if (virtual_name is not None and
             block_device.is_swap_or_ephemeral(virtual_name)):
-            session.query(models.BlockDeviceMapping).\
+
+            _block_device_mapping_get_query(context, session=session).\
                 filter_by(instance_uuid=values['instance_uuid']).\
                 filter_by(virtual_name=virtual_name).\
                 filter(models.BlockDeviceMapping.device_name !=
@@ -2882,19 +2899,15 @@ def block_device_mapping_get_all_by_instance(context, instance_uuid):
 
 @require_context
 def block_device_mapping_destroy(context, bdm_id):
-    session = get_session()
-    with session.begin():
-        session.query(models.BlockDeviceMapping).\
-                filter_by(id=bdm_id).\
-                soft_delete()
+    _block_device_mapping_get_query(context).\
+            filter_by(id=bdm_id).\
+            soft_delete()
 
 
 @require_context
 def block_device_mapping_destroy_by_instance_and_volume(context, instance_uuid,
                                                         volume_id):
-    session = get_session()
-    with session.begin():
-        _block_device_mapping_get_query(context, session=session).\
+    _block_device_mapping_get_query(context).\
             filter_by(instance_uuid=instance_uuid).\
             filter_by(volume_id=volume_id).\
             soft_delete()
@@ -2903,9 +2916,7 @@ def block_device_mapping_destroy_by_instance_and_volume(context, instance_uuid,
 @require_context
 def block_device_mapping_destroy_by_instance_and_device(context, instance_uuid,
                                                         device_name):
-    session = get_session()
-    with session.begin():
-        _block_device_mapping_get_query(context, session=session).\
+    _block_device_mapping_get_query(context).\
             filter_by(instance_uuid=instance_uuid).\
             filter_by(device_name=device_name).\
             soft_delete()
@@ -3342,7 +3353,7 @@ def migration_get_in_progress_by_host_and_node(context, host, node,
                        and_(models.Migration.dest_compute == host,
                             models.Migration.dest_node == node))).\
             filter(~models.Migration.status.in_(['confirmed', 'reverted'])).\
-            options(joinedload('instance')).\
+            options(joinedload_all('instance.system_metadata')).\
             all()
 
 
@@ -4739,11 +4750,17 @@ def archive_deleted_rows_for_table(context, tablename, max_rows):
                        order_by(column).limit(max_rows)
         rows = conn.execute(query).fetchall()
         if rows:
-            insert_statement = shadow_table.insert()
-            conn.execute(insert_statement, rows)
             keys = [getattr(row, column_name) for row in rows]
             delete_statement = table.delete(column.in_(keys))
-            result = conn.execute(delete_statement)
+            try:
+                result = conn.execute(delete_statement)
+            except IntegrityError:
+                # A foreign key constraint keeps us from deleting some of
+                # these rows until we clean up a dependent table.  Just
+                # skip this table for now; we'll come back to it later.
+                return rows_archived
+            insert_statement = shadow_table.insert()
+            conn.execute(insert_statement, rows)
             rows_archived = result.rowcount
     return rows_archived
 

@@ -273,7 +273,7 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
             with common.vios_to_vios_auth(self.connection_data.host,
                                           dest,
                                           self.connection_data) as key_name:
-                cmd = ''.join(['scp -o "StrictHostKeyChecking no"',
+                cmd = ' '.join(['scp -o "StrictHostKeyChecking no"',
                                 ('-i %s' % key_name),
                                 file_path,
                                 '%s@%s:%s' % (self.connection_data.username,
@@ -399,7 +399,10 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
         source_cksum = hasher.hexdigest()
 
         comp_path = os.path.join(remote_path, os.path.basename(source_path))
-        uncomp_path = comp_path.rstrip(".gz")
+        if comp_path.endswith(".gz"):
+            uncomp_path = os.path.splitext(comp_path)[0]
+        else:
+            uncomp_path = comp_path
         if not decompress:
             final_path = comp_path
         else:

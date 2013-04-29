@@ -579,7 +579,8 @@ class LibvirtDriver(driver.ComputeDriver):
             self._wrapped_conn.getLibVersion()
             return True
         except libvirt.libvirtError as e:
-            if (e.get_error_code() == libvirt.VIR_ERR_SYSTEM_ERROR and
+            if (e.get_error_code() in (libvirt.VIR_ERR_SYSTEM_ERROR,
+                                       libvirt.VIR_ERR_INTERNAL_ERROR) and
                 e.get_error_domain() in (libvirt.VIR_FROM_REMOTE,
                                          libvirt.VIR_FROM_RPC)):
                 LOG.debug(_('Connection to libvirt broke'))
@@ -1279,7 +1280,7 @@ class LibvirtDriver(driver.ComputeDriver):
                                        out_path, image_format)
 
     def reboot(self, context, instance, network_info, reboot_type='SOFT',
-               block_device_info=None):
+               block_device_info=None, bad_volumes_callback=None):
         """Reboot a virtual machine, given an instance reference."""
         if reboot_type == 'SOFT':
             # NOTE(vish): This will attempt to do a graceful shutdown/restart.
@@ -2136,8 +2137,10 @@ class LibvirtDriver(driver.ComputeDriver):
 
         quota_items = ['cpu_shares', 'cpu_period', 'cpu_quota']
         for key, value in inst_type['extra_specs'].iteritems():
-            if key in quota_items:
-                setattr(guest, key, value)
+            scope = key.split(':')
+            if len(scope) > 1 and scope[0] == 'quota':
+                if scope[1] in quota_items:
+                    setattr(guest, scope[1], value)
 
         guest.cpu = self.get_guest_cpu_config()
 
@@ -3321,6 +3324,12 @@ class LibvirtDriver(driver.ComputeDriver):
 
             if disk_type != 'file':
                 LOG.debug(_('skipping %(path)s since it looks like volume') %
+                          locals())
+                continue
+
+            if not path:
+                LOG.debug(_('skipping disk for %(instance_name)s as it'
+                            ' does not have a path') %
                           locals())
                 continue
 

@@ -40,6 +40,7 @@ from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 from nova.consoleauth import rpcapi as consoleauth_rpcapi
+from nova import context
 from nova import crypto
 from nova.db import base
 from nova import exception
@@ -1031,15 +1032,13 @@ class API(base.Base):
                                         instance,
                                         **attrs)
 
-            # Avoid double-counting the quota usage reduction
-            # where delete is already in progress
-            if (old['vm_state'] != vm_states.SOFT_DELETED and
-                old['task_state'] not in (task_states.DELETING,
-                                          task_states.SOFT_DELETING)):
-                reservations = self._create_reservations(context,
-                                                         old,
-                                                         updated,
-                                                         project_id)
+            # NOTE(comstud): If we delete the instance locally, we'll
+            # commit the reservations here.  Otherwise, the manager side
+            # will commit or rollback the reservations based on success.
+            reservations = self._create_reservations(context,
+                                                     old,
+                                                     updated,
+                                                     project_id)
 
             if not host:
                 # Just update database, nothing else we can do
@@ -1076,8 +1075,7 @@ class API(base.Base):
                     # 2. down-resize: here -instance['vcpus'/'memory_mb'] are
                     #    shy by delta(old, new) from the quota usages accounted
                     #    for this instance, so we must adjust
-                    deltas = self._downsize_quota_delta(context,
-                                                        migration_ref)
+                    deltas = self._downsize_quota_delta(context, instance)
                     downsize_reservations = self._reserve_quota_delta(context,
                                                                       deltas)
 
@@ -1099,17 +1097,18 @@ class API(base.Base):
                     self._record_action_start(context, instance,
                                               instance_actions.DELETE)
 
-                    cb(context, instance, bdms)
+                    cb(context, instance, bdms, reservations=reservations)
             except exception.ComputeHostNotFound:
                 pass
 
             if not is_up:
                 # If compute node isn't up, just delete from DB
                 self._local_delete(context, instance, bdms)
-            if reservations:
-                QUOTAS.commit(context,
-                              reservations,
-                              project_id=project_id)
+                if reservations:
+                    QUOTAS.commit(context,
+                                  reservations,
+                                  project_id=project_id)
+                    reservations = None
         except exception.InstanceNotFound:
             # NOTE(comstud): Race condition. Instance already gone.
             if reservations:
@@ -1210,16 +1209,18 @@ class API(base.Base):
         LOG.debug(_('Going to try to soft delete instance'),
                   instance=instance)
 
-        def soft_delete(context, instance, bdms):
-            self.compute_rpcapi.soft_delete_instance(context, instance)
+        def soft_delete(context, instance, bdms, reservations=None):
+            self.compute_rpcapi.soft_delete_instance(context, instance,
+                    reservations=reservations)
 
         self._delete(context, instance, soft_delete,
                      task_state=task_states.SOFT_DELETING,
                      deleted_at=timeutils.utcnow())
 
     def _delete_instance(self, context, instance):
-        def terminate(context, instance, bdms):
-            self.compute_rpcapi.terminate_instance(context, instance, bdms)
+        def terminate(context, instance, bdms, reservations=None):
+            self.compute_rpcapi.terminate_instance(context, instance, bdms,
+                    reservations=reservations)
 
         self._delete(context, instance, terminate,
                      task_state=task_states.DELETING)
@@ -1856,7 +1857,7 @@ class API(base.Base):
                 elevated, instance['uuid'], 'finished')
 
         # reserve quota only for any decrease in resource usage
-        deltas = self._downsize_quota_delta(context, migration_ref)
+        deltas = self._downsize_quota_delta(context, instance)
         reservations = self._reserve_quota_delta(context, deltas)
 
         instance = self.update(context, instance, vm_state=vm_states.ACTIVE,
@@ -1931,15 +1932,14 @@ class API(base.Base):
                                        old_instance_type, -1, -1)
 
     @staticmethod
-    def _downsize_quota_delta(context, migration_ref):
+    def _downsize_quota_delta(context, instance):
         """
         Calculate deltas required to adjust quota for an instance downsize.
         """
-        old_instance_type = instance_types.get_instance_type(
-            migration_ref['old_instance_type_id'])
-        new_instance_type = instance_types.get_instance_type(
-            migration_ref['new_instance_type_id'])
-
+        old_instance_type = instance_types.extract_instance_type(instance,
+                                                                 'old_')
+        new_instance_type = instance_types.extract_instance_type(instance,
+                                                                 'new_')
         return API._resize_quota_delta(context, new_instance_type,
                                        old_instance_type, 1, -1)
 
@@ -2284,6 +2284,10 @@ class API(base.Base):
 
     @wrap_check_policy
     @check_instance_lock
+    @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED,
+                                    vm_states.SUSPENDED, vm_states.STOPPED,
+                                    vm_states.RESIZED, vm_states.SOFT_DELETED],
+                          task_state=None)
     def attach_volume(self, context, instance, volume_id, device=None):
         """Attach an existing volume to an existing instance."""
         # NOTE(vish): Fail fast if the device is not going to pass. This
@@ -2313,6 +2317,10 @@ class API(base.Base):
         return device
 
     @check_instance_lock
+    @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED,
+                                    vm_states.SUSPENDED, vm_states.STOPPED,
+                                    vm_states.RESIZED, vm_states.SOFT_DELETED],
+                          task_state=None)
     def _detach_volume(self, context, instance, volume_id):
         check_policy(context, 'detach_volume', instance)
 
@@ -2363,7 +2371,7 @@ class API(base.Base):
     @wrap_check_policy
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED,
-                          vm_states.SUSPENDED, vm_states.STOPPED],
+                                    vm_states.SUSPENDED, vm_states.STOPPED],
                           task_state=None)
     def delete_instance_metadata(self, context, instance, key):
         """Delete the given metadata item from an instance."""
@@ -2377,7 +2385,7 @@ class API(base.Base):
     @wrap_check_policy
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED,
-                          vm_states.SUSPENDED, vm_states.STOPPED],
+                                    vm_states.SUSPENDED, vm_states.STOPPED],
                           task_state=None)
     def update_instance_metadata(self, context, instance,
                                  metadata, delete=False):
@@ -2886,7 +2894,7 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
                 return self.db.security_group_get(context, id)
         except exception.NotFound as exp:
             if map_exception:
-                msg = unicode(exp)
+                msg = exp.format_message()
                 self.raise_not_found(msg)
             else:
                 raise
@@ -3170,7 +3178,11 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
                 self.security_group_rpcapi.refresh_instance_security_rules(
                         context, instance['host'], instance)
 
-    def get_instance_security_groups(self, req, instance_id):
+    def get_instance_security_groups(self, req, instance_id,
+                                     instance_uuid=None, detailed=False):
+        if detailed:
+            return self.db.security_group_get_by_instance(
+                context.get_admin_context(), instance_id)
         instance = req.get_db_instance(instance_id)
         groups = instance.get('security_groups')
         if groups:

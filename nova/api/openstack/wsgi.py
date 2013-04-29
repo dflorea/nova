@@ -19,15 +19,14 @@ import inspect
 import math
 import time
 from xml.dom import minidom
-from xml.parsers import expat
 
 from lxml import etree
 import webob
 
+from nova.api.openstack import xmlutil
 from nova import exception
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
-from nova import utils
 from nova import wsgi
 
 
@@ -216,13 +215,8 @@ class XMLDeserializer(TextDeserializer):
 
     def _from_xml(self, datastring):
         plurals = set(self.metadata.get('plurals', {}))
-
-        try:
-            node = utils.safe_minidom_parse_string(datastring).childNodes[0]
-            return {node.nodeName: self._from_xml_node(node, plurals)}
-        except expat.ExpatError:
-            msg = _("cannot understand XML")
-            raise exception.MalformedRequestBody(reason=msg)
+        node = xmlutil.safe_minidom_parse_string(datastring).childNodes[0]
+        return {node.nodeName: self._from_xml_node(node, plurals)}
 
     def _from_xml_node(self, node, listnames):
         """Convert a minidom node to a simple Python type.
@@ -238,7 +232,8 @@ class XMLDeserializer(TextDeserializer):
         else:
             result = dict()
             for attr in node.attributes.keys():
-                result[attr] = node.attributes[attr].nodeValue
+                if not attr.startswith("xmlns"):
+                    result[attr] = node.attributes[attr].nodeValue
             for child in node.childNodes:
                 if child.nodeType != node.TEXT_NODE:
                     result[child.nodeName] = self._from_xml_node(child,
@@ -593,7 +588,7 @@ class ResponseObject(object):
         response = webob.Response()
         response.status_int = self.code
         for hdr, value in self._headers.items():
-            response.headers[hdr] = value
+            response.headers[hdr] = str(value)
         response.headers['Content-Type'] = content_type
         if self.obj is not None:
             response.body = serializer.serialize(self.obj)
@@ -634,7 +629,7 @@ def action_peek_json(body):
 def action_peek_xml(body):
     """Determine action to invoke."""
 
-    dom = utils.safe_minidom_parse_string(body)
+    dom = xmlutil.safe_minidom_parse_string(body)
     action_node = dom.childNodes[0]
 
     return action_node.tagName
@@ -656,11 +651,12 @@ class ResourceExceptionHandler(object):
             return True
 
         if isinstance(ex_value, exception.NotAuthorized):
-            msg = unicode(ex_value)
+            msg = unicode(ex_value.message % ex_value.kwargs)
             raise Fault(webob.exc.HTTPForbidden(explanation=msg))
         elif isinstance(ex_value, exception.Invalid):
+            msg = unicode(ex_value.message % ex_value.kwargs)
             raise Fault(exception.ConvertedException(
-                code=ex_value.code, explanation=unicode(ex_value)))
+                    code=ex_value.code, explanation=msg))
 
         # Under python 2.6, TypeError's exception value is actually a string,
         # so test # here via ex_type instead:
@@ -890,17 +886,8 @@ class Resource(wsgi.Application):
         #            function.  If we try to audit __call__(), we can
         #            run into troubles due to the @webob.dec.wsgify()
         #            decorator.
-        try:
-            return self._process_stack(request, action, action_args,
-                                   content_type, body, accept)
-        except expat.ExpatError:
-            msg = _("Invalid XML in request body")
-            return Fault(webob.exc.HTTPBadRequest(explanation=msg))
-        except LookupError as e:
-        #NOTE(Vijaya Erukala): XML input such as
-        #                      <?xml version="1.0" encoding="TF-8"?>
-        #                      raises LookupError: unknown encoding: TF-8
-            return Fault(webob.exc.HTTPBadRequest(explanation=unicode(e)))
+        return self._process_stack(request, action, action_args,
+                               content_type, body, accept)
 
     def _process_stack(self, request, action, action_args,
                        content_type, body, accept):
@@ -1163,6 +1150,8 @@ class Fault(webob.exc.HTTPException):
     def __init__(self, exception):
         """Create a Fault for the given webob.exc.exception."""
         self.wrapped_exc = exception
+        for key, value in self.wrapped_exc.headers.items():
+            self.wrapped_exc.headers[key] = str(value)
         self.status_int = exception.status_int
 
     @webob.dec.wsgify(RequestClass=Request)
@@ -1172,12 +1161,8 @@ class Fault(webob.exc.HTTPException):
         code = self.wrapped_exc.status_int
         fault_name = self._fault_names.get(code, "computeFault")
         explanation = self.wrapped_exc.explanation
-        offset = explanation.find("Traceback")
-        if offset is not -1:
-            LOG.debug(_("API request failed, fault raised to the top of"
-                      " the stack. Detailed stacktrace %s") %
-                      explanation)
-            explanation = explanation[0:offset - 1]
+        LOG.debug(_("Returning %(code)s to user: %(explanation)s"),
+                  {'code': code, 'explanation': explanation})
 
         fault_data = {
             fault_name: {

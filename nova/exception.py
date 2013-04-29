@@ -161,6 +161,12 @@ class NovaException(Exception):
 
         super(NovaException, self).__init__(message)
 
+    def format_message(self):
+        if self.__class__.__name__.endswith('_Remote'):
+            return self.args[0]
+        else:
+            return unicode(self)
+
 
 class EC2APIError(NovaException):
     message = _("Unknown")
@@ -388,6 +394,7 @@ class InvalidDevicePath(Invalid):
 
 class DevicePathInUse(Invalid):
     message = _("The supplied device path (%(path)s) is in use.")
+    code = 409
 
 
 class DeviceIsBusy(Invalid):
@@ -1008,6 +1015,10 @@ class FloatingIpLimitExceeded(QuotaError):
     message = _("Maximum number of floating ips exceeded")
 
 
+class FixedIpLimitExceeded(QuotaError):
+    message = _("Maximum number of fixed ips exceeded")
+
+
 class MetadataLimitExceeded(QuotaError):
     message = _("Maximum number of metadata items exceeds %(allowed)d")
 
@@ -1189,3 +1200,7 @@ class UnsupportedVirtType(Invalid):
 class UnsupportedHardware(Invalid):
     message = _("Requested hardware '%(model)s' is not supported by "
                 "the '%(virt)s' virt driver")
+
+
+class Base64Exception(NovaException):
+    message = _("Invalid Base 64 data for file %(path)s")

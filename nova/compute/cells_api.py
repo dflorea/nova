@@ -255,9 +255,9 @@ class ComputeCellsAPI(compute_api.API):
             # broadcast a message down to all cells and hope this ends
             # up resolving itself...  Worse case.. the instance will
             # show back up again here.
-            delete_type = method == 'soft_delete' and 'soft' or 'hard'
+            delete_type = method_name == 'soft_delete' and 'soft' or 'hard'
             self.cells_rpcapi.instance_delete_everywhere(context,
-                    instance['uuid'], delete_type)
+                    instance, delete_type)
 
     @validate_cell
     def restore(self, context, instance):
@@ -326,14 +326,16 @@ class ComputeCellsAPI(compute_api.API):
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED],
                           task_state=[None])
     @validate_cell
-    def resize(self, context, instance, *args, **kwargs):
+    def resize(self, context, instance, flavor_id=None, *args, **kwargs):
         """Resize (ie, migrate) a running instance.
 
         If flavor_id is None, the process is considered a migration, keeping
         the original flavor_id. If flavor_id is not None, the instance should
         be migrated to a new host and resized to the new flavor_id.
         """
-        super(ComputeCellsAPI, self).resize(context, instance, *args, **kwargs)
+        super(ComputeCellsAPI, self).resize(context, instance,
+                                            flavor_id=flavor_id, *args,
+                                            **kwargs)
 
         # NOTE(johannes): If we get to this point, then we know the
         # specified flavor_id is valid and exists. We'll need to load
@@ -341,13 +343,11 @@ class ComputeCellsAPI(compute_api.API):
 
         old_instance_type = instance_types.extract_instance_type(instance)
 
-        flavor_id = kwargs.get('flavor_id')
-
         if not flavor_id:
             new_instance_type = old_instance_type
         else:
-            new_instance_type = instance_types.extract_instance_type(instance,
-                                                                     'new_')
+            new_instance_type = instance_types.get_instance_type_by_flavor_id(
+                    flavor_id, read_deleted="no")
 
         # NOTE(johannes): Later, when the resize is confirmed or reverted,
         # the superclass implementations of those methods will need access
@@ -363,7 +363,8 @@ class ComputeCellsAPI(compute_api.API):
 
         # FIXME(comstud): pass new instance_type object down to a method
         # that'll unfold it
-        self._cast_to_cells(context, instance, 'resize', *args, **kwargs)
+        self._cast_to_cells(context, instance, 'resize', flavor_id=flavor_id,
+                            *args, **kwargs)
 
     @validate_cell
     def add_fixed_ip(self, context, instance, *args, **kwargs):
@@ -615,10 +616,7 @@ class HostAPI(compute_api.HostAPI):
         this call to cells, as we have instance information here in
         the API cell.
         """
-        try:
-            cell_name, host_name = cells_utils.split_cell_and_item(host_name)
-        except ValueError:
-            cell_name = None
+        cell_name, host_name = cells_utils.split_cell_and_item(host_name)
         instances = super(HostAPI, self).instance_get_all_by_host(context,
                                                                   host_name)
         if cell_name:

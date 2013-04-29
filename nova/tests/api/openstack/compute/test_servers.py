@@ -51,6 +51,7 @@ from nova.tests.api.openstack import fakes
 from nova.tests import fake_network
 from nova.tests.image import fake
 from nova.tests import matchers
+from nova.tests import utils
 
 CONF = cfg.CONF
 CONF.import_opt('password_length', 'nova.utils')
@@ -2190,11 +2191,11 @@ class ServersControllerCreateTest(test.TestCase):
         # NOTE(vish): the extension converts OS-DCF:disk_config into
         #             auto_disk_config, so we are testing with
         #             the_internal_value
-        params = {'auto_disk_config': True}
+        params = {'auto_disk_config': 'AUTO'}
         old_create = compute_api.API.create
 
         def create(*args, **kwargs):
-            self.assertEqual(kwargs['auto_disk_config'], True)
+            self.assertEqual(kwargs['auto_disk_config'], 'AUTO')
             return old_create(*args, **kwargs)
 
         self.stubs.Set(compute_api.API, 'create', create)
@@ -3761,14 +3762,14 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     <server xmlns="http://docs.openstack.org/compute/api/v2"
      xmlns:OS-DCF="http://docs.openstack.org/compute/ext/disk_config/api/v1.1"
      name="new-server-test" imageRef="1" flavorRef="1"
-     OS-DCF:diskConfig="True">
+     OS-DCF:diskConfig="AUTO">
     </server>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
                 "imageRef": "1",
                 "flavorRef": "1",
-                "OS-DCF:diskConfig": True,
+                "OS-DCF:diskConfig": "AUTO",
                 }}
         self.assertEquals(request['body'], expected)
 
@@ -3857,6 +3858,76 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
                 "config_drive": "true"
             },
         }
+        self.assertEquals(request['body'], expected)
+
+    def test_corrupt_xml(self):
+        """Should throw a 400 error on corrupt xml."""
+        self.assertRaises(
+                exception.MalformedRequestBody,
+                self.deserializer.deserialize,
+                utils.killer_xml_body())
+
+
+class TestServerActionRequestXMLDeserializer(test.TestCase):
+
+    def setUp(self):
+        super(TestServerActionRequestXMLDeserializer, self).setUp()
+        self.deserializer = servers.ActionDeserializer()
+
+    def test_rebuild_request(self):
+        serial_request = """
+<rebuild xmlns="http://docs.openstack.org/compute/api/v1.1"
+   xmlns:OS-DCF="http://docs.openstack.org/compute/ext/disk_config/api/v1.1"
+   OS-DCF:diskConfig="MANUAL" imageRef="1"/>"""
+        request = self.deserializer.deserialize(serial_request)
+        expected = {
+            "rebuild": {
+                "imageRef": "1",
+                "OS-DCF:diskConfig": "MANUAL",
+                },
+            }
+        self.assertEquals(request['body'], expected)
+
+    def test_rebuild_request_auto_disk_config_compat(self):
+        serial_request = """
+<rebuild xmlns="http://docs.openstack.org/compute/api/v1.1"
+   xmlns:OS-DCF="http://docs.openstack.org/compute/ext/disk_config/api/v1.1"
+   auto_disk_config="MANUAL" imageRef="1"/>"""
+        request = self.deserializer.deserialize(serial_request)
+        expected = {
+            "rebuild": {
+                "imageRef": "1",
+                "OS-DCF:diskConfig": "MANUAL",
+                },
+            }
+        self.assertEquals(request['body'], expected)
+
+    def test_resize_request(self):
+        serial_request = """
+<resize xmlns="http://docs.openstack.org/compute/api/v1.1"
+   xmlns:OS-DCF="http://docs.openstack.org/compute/ext/disk_config/api/v1.1"
+   OS-DCF:diskConfig="MANUAL" flavorRef="1"/>"""
+        request = self.deserializer.deserialize(serial_request)
+        expected = {
+            "resize": {
+                "flavorRef": "1",
+                "OS-DCF:diskConfig": "MANUAL",
+                },
+            }
+        self.assertEquals(request['body'], expected)
+
+    def test_resize_request_auto_disk_config_compat(self):
+        serial_request = """
+<resize xmlns="http://docs.openstack.org/compute/api/v1.1"
+   xmlns:OS-DCF="http://docs.openstack.org/compute/ext/disk_config/api/v1.1"
+   auto_disk_config="MANUAL" flavorRef="1"/>"""
+        request = self.deserializer.deserialize(serial_request)
+        expected = {
+            "resize": {
+                "flavorRef": "1",
+                "OS-DCF:diskConfig": "MANUAL",
+                },
+            }
         self.assertEquals(request['body'], expected)
 
 

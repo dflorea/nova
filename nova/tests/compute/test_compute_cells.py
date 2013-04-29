@@ -18,16 +18,22 @@ Tests For Compute w/ Cells
 """
 import functools
 
+from oslo.config import cfg
+
+from nova.compute import api as compute_api
 from nova.compute import cells_api as compute_cells_api
 from nova import db
+from nova import exception
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
+from nova import quota
 from nova.tests.compute import test_compute
 
 
 LOG = logging.getLogger('nova.tests.test_compute_cells')
 
 ORIG_COMPUTE_API = None
+cfg.CONF.import_opt('enable', 'nova.cells.opts', group='cells')
 
 
 def stub_call_to_cells(context, instance, method, *args, **kwargs):
@@ -40,7 +46,16 @@ def stub_call_to_cells(context, instance, method, *args, **kwargs):
                 dict(vm_state=instance['vm_state'],
                      task_state=instance['task_state']))
 
-    return fn(context, instance, *args, **kwargs)
+    # Use NoopQuotaDriver in child cells.
+    saved_quotas = quota.QUOTAS
+    quota.QUOTAS = quota.QuotaEngine(
+            quota_driver_class=quota.NoopQuotaDriver())
+    compute_api.QUOTAS = quota.QUOTAS
+    try:
+        return fn(context, instance, *args, **kwargs)
+    finally:
+        quota.QUOTAS = saved_quotas
+        compute_api.QUOTAS = saved_quotas
 
 
 def stub_cast_to_cells(context, instance, method, *args, **kwargs):
@@ -52,7 +67,17 @@ def stub_cast_to_cells(context, instance, method, *args, **kwargs):
         db.instance_update(context, instance['uuid'],
                 dict(vm_state=instance['vm_state'],
                      task_state=instance['task_state']))
-    fn(context, instance, *args, **kwargs)
+
+    # Use NoopQuotaDriver in child cells.
+    saved_quotas = quota.QUOTAS
+    quota.QUOTAS = quota.QuotaEngine(
+            quota_driver_class=quota.NoopQuotaDriver())
+    compute_api.QUOTAS = quota.QUOTAS
+    try:
+        fn(context, instance, *args, **kwargs)
+    finally:
+        quota.QUOTAS = saved_quotas
+        compute_api.QUOTAS = saved_quotas
 
 
 def deploy_stubs(stubs, api, original_instance=None):
@@ -90,6 +115,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         super(CellsComputeAPITestCase, self).setUp()
         global ORIG_COMPUTE_API
         ORIG_COMPUTE_API = self.compute_api
+        self.flags(enable=True, group='cells')
 
         def _fake_cell_read_only(*args, **kwargs):
             return False
@@ -168,8 +194,42 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         self.skipTest("This test is failing due to TypeError: "
                       "detach_volume() takes exactly 3 arguments (4 given).")
 
+    def test_no_detach_volume_in_rescue_state(self):
+        self.skipTest("This test is failing due to TypeError: "
+                      "detach_volume() takes exactly 3 arguments (4 given).")
+
     def test_evacuate(self):
         self.skipTest("Test is incompatible with cells.")
+
+    def test_delete_instance_no_cell(self):
+        cells_rpcapi = self.compute_api.cells_rpcapi
+        self.mox.StubOutWithMock(cells_rpcapi,
+                                 'instance_delete_everywhere')
+        self.mox.StubOutWithMock(self.compute_api,
+                                 '_cast_to_cells')
+        inst = self._create_fake_instance()
+        exc = exception.InstanceUnknownCell(instance_uuid=inst['uuid'])
+        self.compute_api._cast_to_cells(self.context, inst,
+                                        'delete').AndRaise(exc)
+        cells_rpcapi.instance_delete_everywhere(self.context,
+                inst, 'hard')
+        self.mox.ReplayAll()
+        self.compute_api.delete(self.context, inst)
+
+    def test_soft_delete_instance_no_cell(self):
+        cells_rpcapi = self.compute_api.cells_rpcapi
+        self.mox.StubOutWithMock(cells_rpcapi,
+                                 'instance_delete_everywhere')
+        self.mox.StubOutWithMock(self.compute_api,
+                                 '_cast_to_cells')
+        inst = self._create_fake_instance()
+        exc = exception.InstanceUnknownCell(instance_uuid=inst['uuid'])
+        self.compute_api._cast_to_cells(self.context, inst,
+                                        'soft_delete').AndRaise(exc)
+        cells_rpcapi.instance_delete_everywhere(self.context,
+                inst, 'soft')
+        self.mox.ReplayAll()
+        self.compute_api.soft_delete(self.context, inst)
 
 
 class CellsComputePolicyTestCase(test_compute.ComputePolicyTestCase):

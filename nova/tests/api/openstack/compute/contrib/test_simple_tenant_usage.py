@@ -22,13 +22,16 @@ import webob
 
 from nova.api.openstack.compute.contrib import simple_tenant_usage
 from nova.compute import api
+from nova.compute import instance_types
 from nova import context
+from nova import exception
 from nova.openstack.common import jsonutils
 from nova.openstack.common import policy as common_policy
 from nova.openstack.common import timeutils
 from nova import policy
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova import utils
 
 SERVERS = 5
 TENANTS = 2
@@ -42,17 +45,21 @@ START = NOW - datetime.timedelta(hours=HOURS)
 STOP = NOW
 
 
-def fake_instance_type_get(self, context, instance_type_id):
-    return {'id': 1,
-            'vcpus': VCPUS,
-            'root_gb': ROOT_GB,
-            'ephemeral_gb': EPHEMERAL_GB,
-            'memory_mb': MEMORY_MB,
-            'name':
-            'fakeflavor'}
+FAKE_INST_TYPE = {'id': 1,
+                  'vcpus': VCPUS,
+                  'root_gb': ROOT_GB,
+                  'ephemeral_gb': EPHEMERAL_GB,
+                  'memory_mb': MEMORY_MB,
+                  'name': 'fakeflavor',
+                  'flavorid': 'foo',
+                  'rxtx_factor': 1.0,
+                  'vcpu_weight': 1,
+                  'swap': 0}
 
 
 def get_fake_db_instance(start, end, instance_id, tenant_id):
+    sys_meta = utils.dict_to_metadata(
+        instance_types.save_instance_type_info({}, FAKE_INST_TYPE))
     return {'id': instance_id,
             'uuid': '00000000-0000-0000-0000-00000000000000%02d' % instance_id,
             'image_ref': '1',
@@ -62,7 +69,8 @@ def get_fake_db_instance(start, end, instance_id, tenant_id):
             'state_description': 'state',
             'instance_type_id': 1,
             'launched_at': start,
-            'terminated_at': end}
+            'terminated_at': end,
+            'system_metadata': sys_meta}
 
 
 def fake_instance_get_active_by_window_joined(self, context, begin, end,
@@ -77,8 +85,6 @@ def fake_instance_get_active_by_window_joined(self, context, begin, end,
 class SimpleTenantUsageTest(test.TestCase):
     def setUp(self):
         super(SimpleTenantUsageTest, self).setUp()
-        self.stubs.Set(api.API, "get_instance_type",
-                       fake_instance_type_get)
         self.stubs.Set(api.API, "get_active_by_window",
                        fake_instance_get_active_by_window_joined)
         self.admin_context = context.RequestContext('fakeadmin_0',
@@ -399,3 +405,66 @@ class SimpleTenantUsageSerializerTest(test.TestCase):
         self.assertEqual(len(raw_usages), len(tree))
         for idx, child in enumerate(tree):
             self._verify_tenant_usage(raw_usages[idx], child)
+
+
+class SimpleTenantUsageControllerTest(test.TestCase):
+    def setUp(self):
+        super(SimpleTenantUsageControllerTest, self).setUp()
+        self.controller = simple_tenant_usage.SimpleTenantUsageController()
+
+        class FakeComputeAPI:
+            def get_instance_type(self, context, flavor_type):
+                if flavor_type == 1:
+                    return instance_types.get_default_instance_type()
+                else:
+                    raise exception.InstanceTypeNotFound(flavor_type)
+
+        self.compute_api = FakeComputeAPI()
+        self.context = None
+
+        now = datetime.datetime.now()
+        self.baseinst = dict(display_name='foo',
+                             launched_at=now - datetime.timedelta(1),
+                             terminated_at=now,
+                             instance_type_id=1,
+                             vm_state='deleted',
+                             deleted=0)
+        basetype = instance_types.get_default_instance_type()
+        sys_meta = utils.dict_to_metadata(
+            instance_types.save_instance_type_info({}, basetype))
+        self.baseinst['system_metadata'] = sys_meta
+        self.basetype = instance_types.extract_instance_type(self.baseinst)
+
+    def test_get_flavor_from_sys_meta(self):
+        # Non-deleted instances get their type information from their
+        # system_metadata
+        flavor = self.controller._get_flavor(self.context, self.compute_api,
+                                             self.baseinst, {})
+        self.assertEqual(flavor, self.basetype)
+
+    def test_get_flavor_from_non_deleted_with_id_fails(self):
+        # If an instance is not deleted and missing type information from
+        # system_metadata, then that's a bug
+        inst_without_sys_meta = dict(self.baseinst, system_metadata=[])
+        self.assertRaises(KeyError,
+                          self.controller._get_flavor, self.context,
+                          self.compute_api, inst_without_sys_meta, {})
+
+    def test_get_flavor_from_deleted_with_id(self):
+        # Deleted instances may not have type info in system_metadata,
+        # so verify that they get their type from a lookup of their
+        # instance_type_id
+        inst_without_sys_meta = dict(self.baseinst, system_metadata=[],
+                                     deleted=1)
+        flavor = self.controller._get_flavor(self.context, self.compute_api,
+                                             inst_without_sys_meta, {})
+        self.assertEqual(flavor, instance_types.get_default_instance_type())
+
+    def test_get_flavor_from_deleted_with_id_of_deleted(self):
+        # Verify the legacy behavior of instance_type_id pointing to a
+        # missing type being non-fatal
+        inst_without_sys_meta = dict(self.baseinst, system_metadata=[],
+                                     deleted=1, instance_type_id=2)
+        flavor = self.controller._get_flavor(self.context, self.compute_api,
+                                             inst_without_sys_meta, {})
+        self.assertEqual(flavor, None)

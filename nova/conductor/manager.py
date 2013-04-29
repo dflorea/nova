@@ -46,14 +46,13 @@ allowed_updates = ['task_state', 'vm_state', 'expected_task_state',
 datetime_fields = ['launched_at', 'terminated_at', 'updated_at']
 
 
-class ConductorManager(manager.SchedulerDependentManager):
+class ConductorManager(manager.Manager):
     """Mission: TBD."""
 
-    RPC_API_VERSION = '1.44'
+    RPC_API_VERSION = '1.46'
 
     def __init__(self, *args, **kwargs):
-        super(ConductorManager, self).__init__(service_name='conductor',
-                                               *args, **kwargs)
+        super(ConductorManager, self).__init__(*args, **kwargs)
         self.security_group_api = (
             openstack_driver.get_openstack_security_group_driver())
         self._network_api = None
@@ -306,7 +305,8 @@ class ConductorManager(manager.SchedulerDependentManager):
                                  wr_bytes, instance['uuid'], last_refreshed,
                                  update_totals)
 
-    @rpc_common.client_exceptions(exception.HostBinaryNotFound)
+    @rpc_common.client_exceptions(exception.ComputeHostNotFound,
+                                  exception.HostBinaryNotFound)
     def service_get_all_by(self, context, topic=None, host=None, binary=None):
         if not any((topic, host, binary)):
             result = self.db.service_get_all(context)
@@ -398,11 +398,11 @@ class ConductorManager(manager.SchedulerDependentManager):
     def network_migrate_instance_finish(self, context, instance, migration):
         self.network_api.migrate_instance_finish(context, instance, migration)
 
-    def quota_commit(self, context, reservations):
-        quota.QUOTAS.commit(context, reservations)
+    def quota_commit(self, context, reservations, project_id=None):
+        quota.QUOTAS.commit(context, reservations, project_id=project_id)
 
-    def quota_rollback(self, context, reservations):
-        quota.QUOTAS.rollback(context, reservations)
+    def quota_rollback(self, context, reservations, project_id=None):
+        quota.QUOTAS.rollback(context, reservations, project_id=project_id)
 
     def get_ec2_ids(self, context, instance):
         ec2_ids = {}
@@ -422,3 +422,6 @@ class ConductorManager(manager.SchedulerDependentManager):
 
     def compute_stop(self, context, instance, do_cast=True):
         self.compute_api.stop(context, instance, do_cast)
+
+    def compute_confirm_resize(self, context, instance, migration_ref):
+        self.compute_api.confirm_resize(context, instance, migration_ref)

@@ -164,6 +164,12 @@ class XenAPIDriver(driver.ComputeDriver):
         """List VM instances."""
         return self._vmops.list_instances()
 
+    def list_instance_uuids(self):
+        """Get the list of nova instance uuids for VMs found on the
+        hypervisor.
+        """
+        return self._vmops.list_instance_uuids()
+
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info=None, block_device_info=None):
         """Create VM instance."""
@@ -194,9 +200,10 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.snapshot(context, instance, image_id, update_task_state)
 
     def reboot(self, context, instance, network_info, reboot_type,
-               block_device_info=None):
+               block_device_info=None, bad_volumes_callback=None):
         """Reboot VM instance."""
-        self._vmops.reboot(instance, reboot_type)
+        self._vmops.reboot(instance, reboot_type,
+                           bad_volumes_callback=bad_volumes_callback)
 
     def set_admin_password(self, instance, new_pass):
         """Set the root/admin password on the VM instance."""

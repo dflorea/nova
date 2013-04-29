@@ -282,8 +282,11 @@ class AdminActionsController(wsgi.Controller):
             instance = self.compute_api.get(context, id)
             self.compute_api.live_migrate(context, instance, block_migration,
                                           disk_over_commit, host)
-        except exception.ComputeServiceUnavailable as ex:
-            raise exc.HTTPBadRequest(explanation=str(ex))
+        except (exception.ComputeServiceUnavailable,
+                exception.InvalidHypervisorType,
+                exception.UnableToMigrateToSelf,
+                exception.DestinationHypervisorTooOld) as ex:
+            raise exc.HTTPBadRequest(explanation=ex.format_message())
         except Exception:
             if host is None:
                 msg = _("Live migration of instance %(id)s to another host"

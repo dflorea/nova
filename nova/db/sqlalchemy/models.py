@@ -154,7 +154,7 @@ class Instance(BASE, NovaBase):
         return base_name
 
     def _extra_keys(self):
-        return ['name', 'system_metadata']
+        return ['name']
 
     user_id = Column(String(255))
     project_id = Column(String(255))
@@ -272,13 +272,6 @@ class InstanceTypes(BASE, NovaBase):
     vcpu_weight = Column(Integer, nullable=True)
     disabled = Column(Boolean, default=False)
     is_public = Column(Boolean, default=True)
-
-    instances = relationship(Instance,
-                           backref=backref('instance_type', uselist=False),
-                           foreign_keys=id,
-                           primaryjoin='and_('
-                               'Instance.instance_type_id == '
-                               'InstanceTypes.id)')
 
 
 class Volume(BASE, NovaBase):

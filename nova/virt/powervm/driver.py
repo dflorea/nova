@@ -106,13 +106,16 @@ class PowerVMDriver(driver.ComputeDriver):
         self._powervm.destroy(instance['name'], destroy_disks)
 
     def reboot(self, context, instance, network_info, reboot_type,
-               block_device_info=None):
+               block_device_info=None, bad_volumes_callback=None):
         """Reboot the specified instance.
 
         :param instance: Instance object as returned by DB layer.
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
         :param reboot_type: Either a HARD or SOFT reboot
+        :param block_device_info: Info pertaining to attached volumes
+        :param bad_volumes_callback: Function to handle any bad volumes
+            encountered
         """
         pass
 
@@ -275,7 +278,7 @@ class PowerVMDriver(driver.ComputeDriver):
                            defines the image from which this instance
                            was created
         """
-        lpar_obj = self._powervm._create_lpar_instance(instance)
+        lpar_obj = self._powervm._create_lpar_instance(instance, network_info)
 
         instance_type = instance_types.extract_instance_type(instance)
         new_lv_size = instance_type['root_gb']

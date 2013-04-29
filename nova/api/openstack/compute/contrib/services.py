@@ -20,7 +20,7 @@ import webob.exc
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
-from nova import availability_zones
+from nova import compute
 from nova import db
 from nova import exception
 from nova.openstack.common import log as logging
@@ -42,22 +42,39 @@ class ServicesIndexTemplate(xmlutil.TemplateBuilder):
         elem.set('zone')
         elem.set('status')
         elem.set('state')
-        elem.set('update_at')
+        elem.set('updated_at')
 
         return xmlutil.MasterTemplate(root, 1)
 
 
-class ServicesUpdateTemplate(xmlutil.TemplateBuilder):
+class ServiceUpdateTemplate(xmlutil.TemplateBuilder):
     def construct(self):
-        root = xmlutil.TemplateElement('host')
+        root = xmlutil.TemplateElement('service', selector='service')
         root.set('host')
-        root.set('service')
-        root.set('disabled')
+        root.set('binary')
+        root.set('status')
 
         return xmlutil.MasterTemplate(root, 1)
+
+
+class ServiceUpdateDeserializer(wsgi.XMLDeserializer):
+    def default(self, string):
+        node = xmlutil.safe_minidom_parse_string(string)
+        service = {}
+        service_node = self.find_first_child_named(node, 'service')
+        if service_node is None:
+            return service
+        service['host'] = service_node.getAttribute('host')
+        service['binary'] = service_node.getAttribute('binary')
+
+        return dict(body=service)
 
 
 class ServiceController(object):
+
+    def __init__(self):
+        self.host_api = compute.HostAPI()
+
     @wsgi.serializers(xml=ServicesIndexTemplate)
     def index(self, req):
         """
@@ -66,19 +83,19 @@ class ServiceController(object):
         context = req.environ['nova.context']
         authorize(context)
         now = timeutils.utcnow()
-        services = db.service_get_all(context)
-        services = availability_zones.set_availability_zones(context, services)
+        services = self.host_api.service_get_all(
+            context, set_zones=True)
 
         host = ''
         if 'host' in req.GET:
             host = req.GET['host']
-        service = ''
-        if 'service' in req.GET:
-            service = req.GET['service']
+        binary = ''
+        if 'binary' in req.GET:
+            binary = req.GET['binary']
         if host:
             services = [s for s in services if s['host'] == host]
-        if service:
-            services = [s for s in services if s['binary'] == service]
+        if binary:
+            services = [s for s in services if s['binary'] == binary]
 
         svcs = []
         for svc in services:
@@ -94,7 +111,8 @@ class ServiceController(object):
                          'updated_at': svc['updated_at']})
         return {'services': svcs}
 
-    @wsgi.serializers(xml=ServicesUpdateTemplate)
+    @wsgi.deserializers(xml=ServiceUpdateDeserializer)
+    @wsgi.serializers(xml=ServiceUpdateTemplate)
     def update(self, req, id, body):
         """Enable/Disable scheduling for a service."""
         context = req.environ['nova.context']
@@ -106,15 +124,14 @@ class ServiceController(object):
             disabled = True
         else:
             raise webob.exc.HTTPNotFound("Unknown action")
-
         try:
             host = body['host']
-            service = body['service']
+            binary = body['binary']
         except (TypeError, KeyError):
             raise webob.exc.HTTPUnprocessableEntity()
 
         try:
-            svc = db.service_get_by_args(context, host, service)
+            svc = db.service_get_by_args(context, host, binary)
             if not svc:
                 raise webob.exc.HTTPNotFound('Unknown service')
 
@@ -122,7 +139,8 @@ class ServiceController(object):
         except exception.ServiceNotFound:
             raise webob.exc.HTTPNotFound("service not found")
 
-        return {'host': host, 'service': service, 'disabled': disabled}
+        status = id + 'd'
+        return {'service': {'host': host, 'binary': binary, 'status': status}}
 
 
 class Services(extensions.ExtensionDescriptor):

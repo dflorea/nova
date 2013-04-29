@@ -47,9 +47,10 @@ class ConsolesController(wsgi.Controller):
                                                       instance,
                                                       console_type)
         except exception.InstanceNotFound as e:
-            raise webob.exc.HTTPNotFound(explanation=unicode(e))
+            raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
-            raise webob.exc.HTTPConflict(explanation=unicode(e))
+            raise webob.exc.HTTPConflict(
+                    explanation=_('Instance not yet ready'))
 
         return {'console': {'type': console_type, 'url': output['url']}}
 
@@ -68,9 +69,9 @@ class ConsolesController(wsgi.Controller):
                                                       instance,
                                                       console_type)
         except exception.InstanceNotFound as e:
-            raise webob.exc.HTTPNotFound(explanation=unicode(e))
+            raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
-            raise webob.exc.HTTPConflict(explanation=unicode(e))
+            raise webob.exc.HTTPConflict(explanation=e.format_message())
 
         return {'console': {'type': console_type, 'url': output['url']}}
 

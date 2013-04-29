@@ -222,11 +222,11 @@ class CommonDeserializer(wsgi.MetadataXMLDeserializer):
         #             anyone that might be using it.
         auto_disk_config = server_node.getAttribute('auto_disk_config')
         if auto_disk_config:
-            server['OS-DCF:diskConfig'] = utils.bool_from_str(auto_disk_config)
+            server['OS-DCF:diskConfig'] = auto_disk_config
 
         auto_disk_config = server_node.getAttribute('OS-DCF:diskConfig')
         if auto_disk_config:
-            server['OS-DCF:diskConfig'] = utils.bool_from_str(auto_disk_config)
+            server['OS-DCF:diskConfig'] = auto_disk_config
 
         config_drive = server_node.getAttribute('config_drive')
         if config_drive:
@@ -317,7 +317,7 @@ class ActionDeserializer(CommonDeserializer):
     """
 
     def default(self, string):
-        dom = utils.safe_minidom_parse_string(string)
+        dom = xmlutil.safe_minidom_parse_string(string)
         action_node = dom.childNodes[0]
         action_name = action_node.tagName
 
@@ -357,7 +357,12 @@ class ActionDeserializer(CommonDeserializer):
             rebuild['name'] = name
 
         if node.hasAttribute("auto_disk_config"):
-            rebuild['auto_disk_config'] = node.getAttribute("auto_disk_config")
+            rebuild['OS-DCF:diskConfig'] = node.getAttribute(
+                "auto_disk_config")
+
+        if node.hasAttribute("OS-DCF:diskConfig"):
+            rebuild['OS-DCF:diskConfig'] = node.getAttribute(
+                "OS-DCF:diskConfig")
 
         metadata_node = self.find_first_child_named(node, "metadata")
         if metadata_node is not None:
@@ -391,7 +396,11 @@ class ActionDeserializer(CommonDeserializer):
             raise AttributeError("No flavorRef was specified in request")
 
         if node.hasAttribute("auto_disk_config"):
-            resize['auto_disk_config'] = node.getAttribute("auto_disk_config")
+            resize['OS-DCF:diskConfig'] = node.getAttribute("auto_disk_config")
+
+        if node.hasAttribute("OS-DCF:diskConfig"):
+            resize['OS-DCF:diskConfig'] = node.getAttribute(
+                "OS-DCF:diskConfig")
 
         return resize
 
@@ -424,7 +433,7 @@ class CreateDeserializer(CommonDeserializer):
 
     def default(self, string):
         """Deserialize an xml-formatted server create request."""
-        dom = utils.safe_minidom_parse_string(string)
+        dom = xmlutil.safe_minidom_parse_string(string)
         server = self._extract_server(dom)
         return {'body': {'server': server}}
 
@@ -888,25 +897,27 @@ class Controller(wsgi.Controller):
                             auto_disk_config=auto_disk_config,
                             scheduler_hints=scheduler_hints)
         except exception.QuotaError as error:
-            raise exc.HTTPRequestEntityTooLarge(explanation=unicode(error),
-                                                headers={'Retry-After': 0})
+            raise exc.HTTPRequestEntityTooLarge(
+                explanation=error.format_message(),
+                headers={'Retry-After': 0})
         except exception.InstanceTypeMemoryTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InstanceTypeNotFound as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error)
         except exception.InstanceTypeDiskTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InvalidMetadata as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InvalidMetadataSize as error:
-            raise exc.HTTPRequestEntityTooLarge(explanation=unicode(error))
+            raise exc.HTTPRequestEntityTooLarge(
+                explanation=error.format_message())
         except exception.InvalidRequest as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.ImageNotFound as error:
             msg = _("Can not find requested image")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.ImageNotActive as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.FlavorNotFound as error:
             msg = _("Invalid flavorRef provided.")
             raise exc.HTTPBadRequest(explanation=msg)
@@ -914,7 +925,7 @@ class Controller(wsgi.Controller):
             msg = _("Invalid key_name provided.")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.SecurityGroupNotFound as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except rpc_common.RemoteError as err:
             msg = "%(err_type)s: %(err_msg)s" % {'err_type': err.exc_type,
                                                  'err_msg': err.value}
@@ -1279,16 +1290,18 @@ class Controller(wsgi.Controller):
             msg = _("Instance could not be found")
             raise exc.HTTPNotFound(explanation=msg)
         except exception.InvalidMetadata as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(
+                explanation=error.format_message())
         except exception.InvalidMetadataSize as error:
-            raise exc.HTTPRequestEntityTooLarge(explanation=unicode(error))
+            raise exc.HTTPRequestEntityTooLarge(
+                explanation=error.format_message())
         except exception.ImageNotFound:
             msg = _("Cannot find image for rebuild")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.InstanceTypeMemoryTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InstanceTypeDiskTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
 
         instance = self._get_server(context, req, id)
 

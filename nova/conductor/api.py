@@ -323,17 +323,23 @@ class LocalAPI(object):
                                                              instance,
                                                              migration)
 
-    def quota_commit(self, context, reservations):
-        return self._manager.quota_commit(context, reservations)
+    def quota_commit(self, context, reservations, project_id=None):
+        return self._manager.quota_commit(context, reservations,
+                                          project_id=project_id)
 
-    def quota_rollback(self, context, reservations):
-        return self._manager.quota_rollback(context, reservations)
+    def quota_rollback(self, context, reservations, project_id=None):
+        return self._manager.quota_rollback(context, reservations,
+                                            project_id=project_id)
 
     def get_ec2_ids(self, context, instance):
         return self._manager.get_ec2_ids(context, instance)
 
     def compute_stop(self, context, instance, do_cast=True):
         return self._manager.compute_stop(context, instance, do_cast)
+
+    def compute_confirm_resize(self, context, instance, migration_ref):
+        return self._manager.compute_confirm_resize(context, instance,
+                                                    migration_ref)
 
 
 class API(object):
@@ -656,14 +662,21 @@ class API(object):
                                                                      instance,
                                                                      migration)
 
-    def quota_commit(self, context, reservations):
-        return self.conductor_rpcapi.quota_commit(context, reservations)
+    def quota_commit(self, context, reservations, project_id=None):
+        return self.conductor_rpcapi.quota_commit(context, reservations,
+                                                  project_id=project_id)
 
-    def quota_rollback(self, context, reservations):
-        return self.conductor_rpcapi.quota_rollback(context, reservations)
+    def quota_rollback(self, context, reservations, project_id=None):
+        return self.conductor_rpcapi.quota_rollback(context, reservations,
+                                                    project_id=project_id)
 
     def get_ec2_ids(self, context, instance):
         return self.conductor_rpcapi.get_ec2_ids(context, instance)
 
     def compute_stop(self, context, instance, do_cast=True):
         return self.conductor_rpcapi.compute_stop(context, instance, do_cast)
+
+    def compute_confirm_resize(self, context, instance, migration_ref):
+        return self.conductor_rpcapi.compute_confirm_resize(context,
+                                                            instance,
+                                                            migration_ref)
