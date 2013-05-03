@@ -1,0 +1,13 @@
+diff --git a/nova/api/openstack/compute/contrib/extended_availability_zone.py b/nova/api/openstack/compute/contrib/extended_availability_zone.py
+index af55721..a1ee85b 100644
+--- a/nova/api/openstack/compute/contrib/extended_availability_zone.py
++++ b/nova/api/openstack/compute/contrib/extended_availability_zone.py
+@@ -37,7 +37,7 @@ class ExtendedAZController(wsgi.Controller):
+         self.mc = memorycache.get_client()
+ 
+     def _get_host_az(self, context, instance):
+-        host = instance.get('host')
++        host = str(instance.get('host'))
+         if not host:
+             return None
+         cache_key = "azcache-%s" % host
